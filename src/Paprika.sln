@@ -12,6 +12,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Paprika.Runner.Pareto", "Pa
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Paprika.Cli", "Paprika.Cli\Paprika.Cli.csproj", "{DD0B1FB7-6D29-47A1-B467-03F28B15FCAE}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Paprika.OS.Tests", "Paprika.OS.Tests\Paprika.OS.Tests.csproj", "{D58DCCC7-D131-476E-87FE-C08EBD00CDEF}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{B1E3D229-DF3A-4ADA-9DF3-91210D571670}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -48,7 +52,13 @@ Global
 		{DD0B1FB7-6D29-47A1-B467-03F28B15FCAE}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{DD0B1FB7-6D29-47A1-B467-03F28B15FCAE}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{DD0B1FB7-6D29-47A1-B467-03F28B15FCAE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D58DCCC7-D131-476E-87FE-C08EBD00CDEF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D58DCCC7-D131-476E-87FE-C08EBD00CDEF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D58DCCC7-D131-476E-87FE-C08EBD00CDEF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D58DCCC7-D131-476E-87FE-C08EBD00CDEF}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
+		{44B0A996-A65A-4BFE-B9F6-708D5A7E54C5} = {B1E3D229-DF3A-4ADA-9DF3-91210D571670}
+		{D58DCCC7-D131-476E-87FE-C08EBD00CDEF} = {B1E3D229-DF3A-4ADA-9DF3-91210D571670}
 	EndGlobalSection
 EndGlobal

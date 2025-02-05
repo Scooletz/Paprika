@@ -1,5 +1,6 @@
 name: "Paprika Tests"
 
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,7 +18,7 @@ env:
 jobs:
   tests:
     timeout-minutes: 20
-    name: "Run Paprika tests"
+    name: "Paprika tests"
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -56,3 +57,27 @@ jobs:
           header: Code Coverage
           recreate: true
           path: code-coverage-results.md
+
+  os-tests:
+    timeout-minutes: 10
+    name: "OS dependent tests"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Test (OS Category Only)
+        run: dotnet test src/Paprika.OS.Tests -c ${{ env.BUILD_CONFIG }}
