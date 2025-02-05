@@ -22,6 +22,7 @@ public class PooledSpanDictionaryBenchmarks
     };
 
     private readonly PooledSpanDictionary _varLengthKeys;
+    private readonly PooledSpanDictionary _readWrite;
     private const int VarLengthKeyCollisions = 8;
     private const ulong VarLengthKeyCollisionHash = 2348598349058394;
 
@@ -51,6 +52,8 @@ public class PooledSpanDictionaryBenchmarks
         {
             _bigDict.Set(VarLengthKey[..VarLengthKeyCollisions], VarLengthKeyCollisionHash, Value32Bytes, 1);
         }
+
+        _readWrite = new PooledSpanDictionary(new BufferPool(128, BufferPool.PageTracking.None, null));
     }
 
     [Benchmark]
@@ -124,16 +127,16 @@ public class PooledSpanDictionaryBenchmarks
     [Benchmark]
     public int Read_write_small()
     {
-        using var dict = new PooledSpanDictionary(_pool, false);
-
         Span<byte> key = stackalloc byte[2];
 
         var count = 0;
         for (byte i = 0; i < 255; i++)
         {
             key[0] = i;
-            dict.Set(key, i, key, 1);
-            dict.TryGet(key, i, out var result);
+
+            _readWrite.Set(key, i, key, 1);
+            _readWrite.TryGet(key, i, out var result);
+
             count += result[0];
         }
 

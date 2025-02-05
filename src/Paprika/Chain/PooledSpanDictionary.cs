@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using Paprika.Crypto;
 using Paprika.Data;
 using Paprika.Store;
+using Paprika.Utils;
 
 namespace Paprika.Chain;
 
@@ -13,6 +14,14 @@ namespace Paprika.Chain;
 /// </summary>
 public class PooledSpanDictionary : IDisposable
 {
+    /// <summary>
+    /// Gets the size of the address to the next item.
+    /// </summary>
+    /// <remarks>
+    /// Pointer size. Assumes 64 bits.     
+    /// </remarks>
+    private const int PointerSize = 8;
+
     private const int BufferSize = BufferPool.BufferSize;
 
     private readonly BufferPool _pool;
@@ -32,8 +41,6 @@ public class PooledSpanDictionary : IDisposable
     /// <remarks>
     /// Set <paramref name="preserveOldValues"/> to true, if the data written once should not be overwritten.
     /// This allows to hold values returned by the dictionary through multiple operations.
-    /// 
-    /// This dictionary uses <see cref="ThreadLocal{T}"/> to store keys buffers to allow concurrent readers
     /// </remarks>
     public PooledSpanDictionary(BufferPool pool, bool preserveOldValues = false)
     {
@@ -43,8 +50,14 @@ public class PooledSpanDictionary : IDisposable
         var pages = new Page[Root.PageCount];
         for (var i = 0; i < Root.PageCount; i++)
         {
-            pages[i] = RentNewPage(true);
+            pages[i] = RentNewPage(false);
         }
+
+        ParallelUnbalancedWork.For(0, Root.PageCount, pages, (i, p) =>
+        {
+            p[i].Clear();
+            return p;
+        });
 
         _root = new Root(pages);
 
@@ -83,24 +96,24 @@ public class PooledSpanDictionary : IDisposable
     // How many bytes are used for preamble + hash leftover
     private const int PreambleLength = 3;
 
-    private const int AddressLength = 4;
+    private const int AddressLength = PointerSize;
 
     private const int KeyLengthLength = 1;
     private const int ValueLengthLength = 2;
 
-    private unsafe SearchResult TryGetImpl(scoped ReadOnlySpan<byte> key, uint leftover, uint bucket)
+    private SearchResult TryGetImpl(scoped ReadOnlySpan<byte> key, uint leftover, uint bucket)
     {
         Debug.Assert(BitOperations.LeadingZeroCount(leftover) >= 11, "First 10 bits should be left unused");
 
-        var address = _root[(int)bucket];
-        if (address == 0) goto NotFound;
+        ref var location = ref _root[(int)bucket];
 
-        ref var pages = ref MemoryMarshal.GetReference(CollectionsMarshal.AsSpan(_pages));
+        var address = Volatile.Read(ref location);
+
+        if (address == UIntPtr.Zero) goto NotFound;
+
         do
         {
-            var (pageNo, atPage) = Math.DivRem(address, Page.PageSize);
-
-            ref var at = ref Unsafe.AsRef<byte>((byte*)Unsafe.Add(ref pages, pageNo).Raw.ToPointer() + atPage);
+            ref var at = ref ReadAtAddress(address);
 
             var header = at & PreambleBits;
             if ((header & DestroyedBit) == 0)
@@ -126,11 +139,13 @@ public class PooledSpanDictionary : IDisposable
             }
 
             // Decode next entry address
-            address = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref at, PreambleLength));
+            address = Unsafe.ReadUnaligned<UIntPtr>(ref Unsafe.Add(ref at, PreambleLength));
         } while (address != 0);
     NotFound:
         return default;
     }
+
+    private static unsafe ref byte ReadAtAddress(UIntPtr address) => ref Unsafe.AsRef<byte>(address.ToPointer());
 
     private static (uint leftover, uint bucket) GetBucketAndLeftover(ulong hash)
         => Math.DivRem(Mix(hash), Root.BucketCount);
@@ -270,8 +285,6 @@ public class PooledSpanDictionary : IDisposable
 
         Debug.Assert(BitOperations.LeadingZeroCount(leftover) >= 10, "First 10 bits should be left unused");
 
-        var root = _root[(int)bucket];
-
         var dataLength = data1.Length + data0.Length;
 
         var size = PreambleLength + AddressLength + KeyLengthLength + key.Length + ValueLengthLength + dataLength;
@@ -282,9 +295,6 @@ public class PooledSpanDictionary : IDisposable
         destination[0] = (byte)((leftover >> 16) | (uint)(metadata << MetadataShift));
         destination[1] = (byte)(leftover >> 8);
         destination[2] = (byte)(leftover & 0xFF);
-
-        // Write next
-        Unsafe.WriteUnaligned(ref destination[PreambleLength], root);
 
         // Key length
         const int keyStart = PreambleLength + AddressLength;
@@ -301,7 +311,25 @@ public class PooledSpanDictionary : IDisposable
         data0.CopyTo(destination[(valueStart + ValueLengthLength)..]);
         data1.CopyTo(destination[(valueStart + ValueLengthLength + data0.Length)..]);
 
-        _root[(int)bucket] = address;
+        // Write root back to the bucket at the root.
+        // The location is a subject of CAS operation and should always be aligned. This is ensured by the root.
+        // All the other writes require no alignment as they are not updated with CAS.
+        ref var location = ref _root[(int)bucket];
+
+        UIntPtr root;
+        var current = Volatile.Read(ref location);
+
+        do
+        {
+            // copy to the root first
+            root = current;
+
+            // write next
+            Unsafe.WriteUnaligned(ref destination[PreambleLength], root);
+
+            // try swap remembering current
+            current = Interlocked.CompareExchange(ref location, address, root);
+        } while (current != root);
     }
 
     public void Destroy(scoped ReadOnlySpan<byte> key, ulong hash)
@@ -319,10 +347,10 @@ public class PooledSpanDictionary : IDisposable
     /// Enumerator walks through all the values beside the ones that were destroyed in this dictionary
     /// with <see cref="PooledSpanDictionary.Destroy"/>.
     /// </summary>
-    public ref struct Enumerator(PooledSpanDictionary dictionary)
+    public unsafe ref struct Enumerator(PooledSpanDictionary dictionary)
     {
         private int _bucket = -1;
-        private uint _address = 0;
+        private UIntPtr _address = 0;
         private ref byte _at;
 
         public bool MoveNext()
@@ -330,7 +358,7 @@ public class PooledSpanDictionary : IDisposable
             while (_bucket < Root.BucketCount)
             {
                 // On empty, scan to the next bucket that is not empty
-                while (_address == 0)
+                while (_address == UIntPtr.Zero)
                 {
                     _bucket++;
                     if (_bucket == Root.BucketCount)
@@ -338,17 +366,17 @@ public class PooledSpanDictionary : IDisposable
                         return false;
                     }
 
-                    _address = dictionary._root[_bucket];
+                    _address = Volatile.Read(ref dictionary._root[_bucket]);
                 }
 
                 // Scan the bucket till it's not destroyed
-                while (_address != 0)
+                while (_address != UIntPtr.Zero)
                 {
                     // Capture the current, move address to next immediately
-                    ref var at = ref dictionary.GetAt(_address);
+                    ref var at = ref ReadAtAddress(_address);
 
                     // The position is captured in ref at above, move to next
-                    _address = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref at, PreambleLength));
+                    _address = Unsafe.ReadUnaligned<UIntPtr>(ref Unsafe.Add(ref at, PreambleLength));
 
                     if ((at & DestroyedBit) == 0)
                     {
@@ -418,14 +446,6 @@ public class PooledSpanDictionary : IDisposable
         }
     }
 
-    private ref byte GetAt(uint address)
-    {
-        Debug.Assert(address > 0);
-
-        var (pageNo, atPage) = Math.DivRem(address, Page.PageSize);
-        return ref Unsafe.Add(ref MemoryMarshal.GetReference(_pages[(int)pageNo].Span), (int)atPage);
-    }
-
     private void AllocateNewPage()
     {
         var page = RentNewPage(false);
@@ -440,25 +460,39 @@ public class PooledSpanDictionary : IDisposable
         return page;
     }
 
-
     private static uint Mix(ulong hash) => unchecked((uint)((hash >> 32) ^ hash));
 
+    private readonly object _lock = new();
 
-    private Span<byte> Write(int size, out uint addr)
+    private static int Align(int value, int alignment) => (value + (alignment - 1)) & -alignment;
+
+    private Span<byte> Write(int size, out UIntPtr addr)
     {
-        if (BufferSize - _position < size)
+        // Memoize to make contention as small as possible
+        Page current;
+        int position;
+
+        // Align so that we don't step on each other too much.
+        size = Align(size, PointerSize);
+
+        lock (_lock)
         {
-            // not enough memory
-            AllocateNewPage();
+            if (BufferSize - _position < size)
+            {
+                // not enough memory
+                AllocateNewPage();
+            }
+
+            position = _position;
+            current = _current;
+
+            // Amend _position so that it can be used by other threads.
+            _position += size;
         }
 
         // allocated before the position is changed
-        var span = _current.Span.Slice(_position, size);
-
-        addr = (uint)(_position + (_pages.Count - 1) * BufferSize);
-        _position += size;
-
-        return span;
+        addr = current.Raw + (UIntPtr)position;
+        return current.Span.Slice(position, size);
     }
 
     public void Dispose()
@@ -513,27 +547,42 @@ public class PooledSpanDictionary : IDisposable
         static string S(in NibblePath full) => full.UnsafeAsKeccak.ToString();
     }
 
-    private readonly struct Root(Page[] pages)
+    [StructLayout(LayoutKind.Explicit, Size = SizeOf)]
+    private readonly struct Root
     {
+        [FieldOffset(0)]
+        private readonly Page _pages;
+
+        public Root(Page[] pages)
+        {
+            Debug.Assert(pages.Length == PageCount);
+            pages.CopyTo(MemoryMarshal.CreateSpan(ref _pages, PageCount));
+        }
+
         /// <summary>
-        /// 16gives 4kb * 16, 64kb allocated per dictionary.
-        /// This gives 16k buckets which should be sufficient to have a really low ratio of collisions for majority of the blocks.
+        /// The size of this structure.
         /// </summary>
-        public const int PageCount = 16;
+        private const int SizeOf = PageCount * PointerSize;
+
+        /// <summary>
+        /// The total number of pages used by the root construct. The bigger, the bigger fanout it is.
+        /// </summary>
+        public const int PageCount = 32;
 
         public static readonly int BucketCountLog2 = BitOperations.Log2(BucketCount);
 
         public const int BucketCount = PageCount * BucketsPerPage;
-        private const int BucketsPerPage = Page.PageSize / sizeof(uint);
+        private const int BucketsPerPage = Page.PageSize / PointerSize;
         private const int InPageMask = BucketsPerPage - 1;
         private static readonly int PageShift = BitOperations.Log2(BucketsPerPage);
 
-        public unsafe ref uint this[int bucket]
+        public unsafe ref UIntPtr this[int bucket]
         {
             get
             {
-                var raw = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages), bucket >> PageShift).Raw;
-                return ref Unsafe.Add(ref Unsafe.AsRef<uint>(raw.ToPointer()), bucket & InPageMask);
+                var shift = bucket >> PageShift;
+                var raw = Unsafe.Add(ref Unsafe.AsRef(in _pages), shift).Raw;
+                return ref Unsafe.Add(ref Unsafe.AsRef<UIntPtr>(raw.ToPointer()), bucket & InPageMask);
             }
         }
     }

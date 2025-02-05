@@ -1211,73 +1211,35 @@ public class Blockchain : IAsyncDisposable
             }
         }
 
-        IChildCommit ICommit.GetChild() => new ChildCommit(Pool, this);
+        IChildCommit ICommit.GetChild() => new ChildCommit(this, this);
 
         public IReadOnlySet<Keccak> TouchedAccounts => _touchedAccounts;
 
         public IReadOnlyDictionary<Keccak, IStorageStats> TouchedStorageSlots => _storageSlots;
 
-        class ChildCommit(BufferPool pool, ICommit parent) : RefCountingDisposable, IChildCommit
+        sealed class ChildCommit(ICommit parent, BlockState owner) : IChildCommit
         {
-            private readonly PooledSpanDictionary _dict = new(pool, true);
+            public ReadOnlySpanOwnerWithMetadata<byte> Get(scoped in Key key) => parent.Get(in key);
 
-            [SkipLocalsInit]
-            public ReadOnlySpanOwnerWithMetadata<byte> Get(scoped in Key key)
+            public void Set(in Key key, in ReadOnlySpan<byte> payload, EntryType type = EntryType.Persistent) =>
+                parent.Set(in key, in payload, type);
+
+            public void Set(in Key key, in ReadOnlySpan<byte> payload0, in ReadOnlySpan<byte> payload1,
+                EntryType type = EntryType.Persistent) => parent.Set(in key, in payload0, in payload1, type);
+
+            public IChildCommit GetChild() => parent.GetChild();
+
+            public bool Owns(object? actualSpanOwner) => ReferenceEquals(actualSpanOwner, owner);
+
+            public void Dispose()
             {
-                var hash = GetHash(key);
-                var keyWritten = key.WriteTo(stackalloc byte[key.MaxByteLength]);
-
-                if (_dict.TryGet(keyWritten, hash, out var result))
-                {
-                    AcquireLease();
-                    return new ReadOnlySpanOwnerWithMetadata<byte>(new ReadOnlySpanOwner<byte>(result, this), 0);
-                }
-
-                // Don't nest, as reaching to parent should be easy.
-                return parent.Get(key);
-            }
-
-            [SkipLocalsInit]
-            public void Set(in Key key, in ReadOnlySpan<byte> payload, EntryType type)
-            {
-                var hash = GetHash(key);
-                var keyWritten = key.WriteTo(stackalloc byte[key.MaxByteLength]);
-
-                _dict.Set(keyWritten, hash, payload, (byte)type);
-            }
-
-            [SkipLocalsInit]
-            public void Set(in Key key, in ReadOnlySpan<byte> payload0, in ReadOnlySpan<byte> payload1, EntryType type)
-            {
-                var hash = GetHash(key);
-                var keyWritten = key.WriteTo(stackalloc byte[key.MaxByteLength]);
-
-                _dict.Set(keyWritten, hash, payload0, payload1, (byte)type);
+                // NOOP, nothing to dispose
             }
 
             public void Commit()
             {
-                foreach (var kvp in _dict)
-                {
-                    Key.ReadFrom(kvp.Key, out var key);
-                    var type = (EntryType)kvp.Metadata;
-
-                    // flush down only volatiles
-                    if (type != EntryType.UseOnce)
-                    {
-                        parent.Set(key, kvp.Value, type);
-                    }
-                }
+                // NOOP, nothing to commit
             }
-
-            public IChildCommit GetChild() => new ChildCommit(pool, this);
-
-            protected override void CleanUp()
-            {
-                _dict.Dispose();
-            }
-
-            public override string ToString() => _dict.ToString();
         }
 
         [SkipLocalsInit]

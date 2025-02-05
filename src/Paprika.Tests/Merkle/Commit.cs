@@ -183,15 +183,9 @@ public class Commit(bool skipMemoizedRlpCheck = false) : ICommitWithStats
         return bytes;
     }
 
-    class ChildCommit : IChildCommit
+    class ChildCommit(ICommit commit) : IChildCommit
     {
-        private readonly ICommit _commit;
         private readonly Dictionary<byte[], byte[]> _data = new(Comparer);
-
-        public ChildCommit(ICommit commit)
-        {
-            _commit = commit;
-        }
 
         public void Dispose() => _data.Clear();
 
@@ -199,7 +193,7 @@ public class Commit(bool skipMemoizedRlpCheck = false) : ICommitWithStats
         {
             return _data.TryGetValue(GetKey(key), out var value)
                 ? new ReadOnlySpanOwner<byte>(value, null).WithDepth(0)
-                : _commit.Get(key);
+                : commit.Get(key);
         }
 
         public void Set(in Key key, in ReadOnlySpan<byte> payload, EntryType type)
@@ -217,7 +211,7 @@ public class Commit(bool skipMemoizedRlpCheck = false) : ICommitWithStats
             foreach (var kvp in _data)
             {
                 Key.ReadFrom(kvp.Key, out var key);
-                _commit.Set(key, kvp.Value);
+                commit.Set(key, kvp.Value);
             }
         }
 
