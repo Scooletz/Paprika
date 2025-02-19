@@ -2,7 +2,9 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.IO.MemoryMappedFiles;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading.Channels;
 using Microsoft.Win32.SafeHandles;
 using Paprika.Utils;
 
@@ -13,8 +15,10 @@ public sealed class MemoryMappedPageManager : PointerPageManager
     private readonly PersistenceOptions _options;
 
     /// <summary>
-    /// The only option is random access. As Paprika jumps over the file, any prefetching is futile.
-    /// Also, the file cannot be async to use some of the mmap features. So here it is, random access file.
+    /// As Paprika jumps to various addresses in the file, using <see cref="FileOptions.SequentialScan"/>
+    /// would be harmful and <see cref="FileOptions.RandomAccess"/> is used.
+    ///
+    /// The file uses <see cref="FileOptions.Asynchronous"/> to issue proper async <see cref="WriteAt"/> operations. 
     /// </summary>
     private const FileOptions PaprikaFileOptions = FileOptions.RandomAccess | FileOptions.Asynchronous;
 
@@ -24,6 +28,18 @@ public sealed class MemoryMappedPageManager : PointerPageManager
     private readonly MemoryMappedFile _mapped;
     private readonly MemoryMappedViewAccessor _whole;
     private readonly unsafe byte* _ptr;
+
+    // Prefetcher
+    private const int PrefetcherCapacity = 1000;
+    private readonly Channel<DbAddress> _prefetches = Channel.CreateBounded<DbAddress>(new BoundedChannelOptions(PrefetcherCapacity)
+    {
+        FullMode = BoundedChannelFullMode.DropOldest,
+        SingleReader = true,
+        SingleWriter = false,
+        Capacity = PrefetcherCapacity,
+        AllowSynchronousContinuations = false
+    });
+    private readonly Task _prefetcher;
 
     // Flusher section
     private readonly Stack<PageMemoryOwner> _owners = new();
@@ -77,6 +93,8 @@ public sealed class MemoryMappedPageManager : PointerPageManager
         _meter = new Meter("Paprika.Store.PageManager");
         _fileWrites = _meter.CreateHistogram<int>("File writes", "Syscall", "Actual numbers of file writes issued");
         _writeTime = _meter.CreateHistogram<int>("Write time", "ms", "Time spent in writing");
+
+        _prefetcher = Platform.CanPrefetch ? Task.Factory.StartNew(RunPrefetcher) : Task.CompletedTask;
     }
 
     public static string GetPaprikaFilePath(string dir) => System.IO.Path.Combine(dir, PaprikaFileName);
@@ -84,6 +102,68 @@ public sealed class MemoryMappedPageManager : PointerPageManager
     public string Path { get; }
 
     protected override unsafe void* Ptr => _ptr;
+
+    protected override void PrefetchHeavy(DbAddress address)
+    {
+        if (Platform.CanPrefetch == false)
+            return;
+
+        if (address.IsNull == false)
+        {
+            _prefetches.Writer.TryWrite(address);
+        }
+    }
+
+    public override void Prefetch(ReadOnlySpan<DbAddress> addresses)
+    {
+        if (Platform.CanPrefetch == false)
+            return;
+
+        var writer = _prefetches.Writer;
+
+        foreach (var address in addresses)
+        {
+            if (address.IsNull == false)
+            {
+                writer.TryWrite(address);
+            }
+        }
+    }
+
+    private async Task RunPrefetcher()
+    {
+        var reader = _prefetches.Reader;
+
+        while (await reader.WaitToReadAsync())
+        {
+            PrefetchImpl(reader, this);
+        }
+
+        return;
+
+        [SkipLocalsInit]
+        static void PrefetchImpl(ChannelReader<DbAddress> reader, MemoryMappedPageManager manager)
+        {
+            const int maxPrefetch = 128;
+
+            Span<AddressRange> span = stackalloc AddressRange[maxPrefetch];
+            var i = 0;
+
+            for (; i < maxPrefetch; i++)
+            {
+                if (reader.TryRead(out var address) == false)
+                    break;
+
+                span[i] = manager.GetAddressRange(address);
+            }
+
+            if (i == 0)
+                return;
+
+            // TODO: potentially sort and merge consecutive chunks
+            Platform.Prefetch(span[..i]);
+        }
+    }
 
     public override async ValueTask WritePages(ICollection<DbAddress> dbAddresses, CommitOptions options)
     {
@@ -184,8 +264,18 @@ public sealed class MemoryMappedPageManager : PointerPageManager
 
     public override bool UsesPersistentPaging => _options == PersistenceOptions.FlushFile;
 
+    /// <summary>
+    /// Obtains an address range at the given <paramref name="address"/> for <see cref="Platform.Prefetch"/>.
+    /// </summary>
+    /// <param name="address"></param>
+    /// <returns></returns>
+    public AddressRange GetAddressRange(DbAddress address) => new(GetAt(address).Raw, Page.PageSize);
+
     public override void Dispose()
     {
+        _prefetches.Writer.Complete();
+        _prefetcher.Wait();
+
         _meter.Dispose();
 
         _whole.SafeMemoryMappedViewHandle.ReleasePointer();

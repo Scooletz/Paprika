@@ -19,6 +19,16 @@ public sealed unsafe class NativeMemoryPageManager : PointerPageManager
 
     protected override void* Ptr => _ptr;
 
+    protected override void PrefetchHeavy(DbAddress address) => PrefetchSoft(address);
+
+    public override void Prefetch(ReadOnlySpan<DbAddress> addresses)
+    {
+        foreach (var address in addresses)
+        {
+            PrefetchSoft(address);
+        }
+    }
+
     public override void Flush()
     {
     }

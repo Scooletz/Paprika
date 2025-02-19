@@ -11,7 +11,23 @@ public abstract unsafe class PointerPageManager(long size) : IPageManager
 
     protected abstract void* Ptr { get; }
 
-    public void Prefetch(DbAddress address)
+    public void Prefetch(DbAddress address, PrefetchMode mode)
+    {
+        if (mode == PrefetchMode.Soft)
+        {
+            PrefetchSoft(address);
+        }
+        else
+        {
+            PrefetchHeavy(address);
+        }
+    }
+
+    protected abstract void PrefetchHeavy(DbAddress address);
+
+    public abstract void Prefetch(ReadOnlySpan<DbAddress> addresses);
+
+    protected void PrefetchSoft(DbAddress address)
     {
         if (Sse.IsSupported)
         {

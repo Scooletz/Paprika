@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using Paprika.Crypto;
 
 namespace Paprika.Store;
@@ -124,29 +125,44 @@ public interface IPageResolver
     /// </summary>
     Page GetAt(DbAddress address);
 
-    void Prefetch(DbAddress address);
+    /// <summary>
+    /// Issues a prefetch request for the page at the specific location <paramref name="address"/>
+    /// using mechanism defined by the <paramref name="mode"/>.
+    /// </summary>
+    void Prefetch(DbAddress address, PrefetchMode mode);
 
-    void Prefetch(ReadOnlySpan<DbAddress> addresses)
-    {
-        foreach (var bucket in addresses)
-        {
-            if (!bucket.IsNull)
-            {
-                Prefetch(bucket);
-            }
-        }
-    }
+    /// <summary>
+    /// Issues a prefetch request for a set of pages residing at <paramref name="addresses"/>.
+    /// The prefetch mode that is used is <see cref="PrefetchMode.Heavy"/>.
+    /// </summary>
+    void Prefetch(ReadOnlySpan<DbAddress> addresses);
 
+    [SkipLocalsInit]
     void Prefetch<TAddressList>(in TAddressList addresses)
         where TAddressList : struct, DbAddressList.IDbAddressList
     {
+        Span<DbAddress> span = stackalloc DbAddress[TAddressList.Length];
+
+        // Copy all
         for (var i = 0; i < TAddressList.Length; i++)
         {
-            var addr = addresses[i];
-            if (!addr.IsNull)
-            {
-                Prefetch(addr);
-            }
+            span[i] = addresses[i];
         }
+
+        Prefetch(span);
     }
+}
+
+public enum PrefetchMode
+{
+    /// <summary>
+    /// Expects that the page was not evicted and only should be brought to CPU case using SSE prefetch.
+    /// </summary>
+    Soft,
+
+    /// <summary>
+    /// Expects that the page was not accessed lately or was evicted from the memory.
+    /// The page should be prefetched using platform specific heavy prefetch <see cref="Platform.Prefetch"/>.
+    /// </summary>
+    Heavy,
 }

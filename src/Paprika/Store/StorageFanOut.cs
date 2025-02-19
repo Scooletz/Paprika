@@ -677,12 +677,12 @@ public static class StorageFanOut
                     new BottomPage(root).Accept(ref builder, visitor, resolver, Root);
             }
 
-            public void Prefetch(IPageResolver resolver)
+            public void PrefetchForAccept(IPageResolver resolver)
             {
                 if (Root.IsNull)
                     return;
 
-                resolver.Prefetch(Root);
+                resolver.Prefetch(Root, PrefetchMode.Heavy);
             }
         }
 
@@ -692,7 +692,7 @@ public static class StorageFanOut
 
             foreach (ref var bucket in Data.Buckets)
             {
-                bucket.Prefetch(resolver);
+                bucket.PrefetchForAccept(resolver);
             }
 
             foreach (ref var bucket in Data.Buckets)

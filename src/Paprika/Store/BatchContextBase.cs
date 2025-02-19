@@ -10,7 +10,9 @@ abstract class BatchContextBase(uint batchId) : IBatchContext
     public uint BatchId { get; } = batchId;
 
     public abstract Page GetAt(DbAddress address);
-    public abstract void Prefetch(DbAddress address);
+    public abstract void Prefetch(DbAddress address, PrefetchMode mode);
+
+    public abstract void Prefetch(ReadOnlySpan<DbAddress> addresses);
 
     public abstract DbAddress GetAddress(Page page);
 
