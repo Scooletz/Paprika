@@ -54,12 +54,12 @@ public readonly unsafe struct StateRootPage(Page page) : IPage
         if (addr.IsNull)
         {
             batch
-                .GetNewCleanPage<DataPage>(out addr, ConsumedNibbles)
+                .GetNewCleanPage<FanOutPage>(out addr, ConsumedNibbles)
                 .Set(sliced, data, batch);
         }
         else
         {
-            addr = batch.GetAddress(new DataPage(batch.GetAt(addr)).Set(sliced, data, batch));
+            addr = batch.GetAddress(new FanOutPage(batch.GetAt(addr)).Set(sliced, data, batch));
         }
 
         return page;
@@ -102,7 +102,7 @@ public readonly unsafe struct StateRootPage(Page page) : IPage
 
         if (!addr.IsNull)
         {
-            addr = batch.GetAddress(new DataPage(batch.GetAt(addr)).DeleteByPrefix(sliced, batch));
+            addr = batch.GetAddress(new FanOutPage(batch.GetAt(addr)).DeleteByPrefix(sliced, batch));
         }
 
         return page;
@@ -113,7 +113,7 @@ public readonly unsafe struct StateRootPage(Page page) : IPage
 
             if (!addrShort.IsNull)
             {
-                addrShort = batch.GetAddress(new DataPage(batch.GetAt(addrShort)).DeleteByPrefix(NibblePath.Empty, batch));
+                addrShort = batch.GetAddress(new FanOutPage(batch.GetAt(addrShort)).DeleteByPrefix(NibblePath.Empty, batch));
             }
 
             return ref addrShort;
@@ -171,7 +171,7 @@ public readonly unsafe struct StateRootPage(Page page) : IPage
             return false;
         }
 
-        return new DataPage(batch.GetAt(addr)).TryGet(batch, key.SliceFrom(ConsumedNibbles), out result);
+        return new FanOutPage(batch.GetAt(addr)).TryGet(batch, key.SliceFrom(ConsumedNibbles), out result);
     }
 
     public void Accept(ref NibblePath.Builder prefix, IPageVisitor visitor, IPageResolver resolver, DbAddress addr)
@@ -187,15 +187,14 @@ public readonly unsafe struct StateRootPage(Page page) : IPage
                 }
 
                 var child = resolver.GetAt(bucket);
-                Debug.Assert(child.Header.PageType == PageType.DataPage);
+                Debug.Assert(child.Header.PageType == PageType.FanOut256);
 
                 var nibble0 = (byte)(i >> NibblePath.NibbleShift);
                 var nibble1 = (byte)(i & NibblePath.NibbleMask);
 
                 prefix.Push(nibble0, nibble1);
-
                 {
-                    new DataPage(child).Accept(ref prefix, visitor, resolver, bucket);
+                    new FanOutPage(child).Accept(ref prefix, visitor, resolver, bucket);
                 }
 
                 prefix.Pop(2);

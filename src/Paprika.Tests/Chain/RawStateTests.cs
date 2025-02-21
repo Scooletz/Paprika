@@ -298,7 +298,7 @@ public class RawStateTests
         var hashAccount4 = raw.GetHash(NibblePath.Parse("02"), false);
         var hashBranch2 = raw.GetHash(NibblePath.Parse("0"), false);
 
-        using var localDb = PagedDb.NativeMemoryDb(32 * 1024, 2);
+        using var localDb = PagedDb.NativeMemoryDb(64 * 1024, 2);
         var localBlockchain = new Blockchain(localDb, merkle);
 
         using var syncRaw = localBlockchain.StartRaw();

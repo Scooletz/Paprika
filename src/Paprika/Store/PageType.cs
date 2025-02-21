@@ -28,4 +28,9 @@ public enum PageType : byte
     /// <see cref="StorageFanOut"/>
     /// </summary>
     FanOutPage = 5,
+
+    /// <summary>
+    /// The fan out page of 256.
+    /// </summary>
+    FanOut256 = 6,
 }

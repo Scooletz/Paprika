@@ -106,6 +106,8 @@ public class StatisticsVisitor : IPageVisitor
                     return new BottomLevelUp(_current);
                 case PageType.StateRoot:
                     break;
+                case PageType.FanOut256:
+                    break;
                 default:
                     throw new Exception($"Not handled type {p.Header.PageType}");
             }

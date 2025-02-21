@@ -402,9 +402,11 @@ public readonly unsafe struct BottomPage(Page page) : IPage<BottomPage>
         Header.PageType = DataPage.DefaultType;
         Header.Metadata = 0; // clear metadata
 
+        Debug.Assert(Data.SideCar.IsNull);
+        var sideCar = batch.GetNewPage<BottomPage>(out Data.SideCar, Header.Level);
+
         // The child pages though are different because they don't have their prefix truncated.
         // Each of them needs to be turned into a bottom page with children truncated by one nibble.
-
         var required = Data.DataSpan.Length;
         var array = ArrayPool<byte>.Shared.Rent(required);
         var buffer = array.AsSpan(0, required);
@@ -423,6 +425,12 @@ public readonly unsafe struct BottomPage(Page page) : IPage<BottomPage>
 
             foreach (var item in child.Map.EnumerateAll())
             {
+                if (DataPage.ShouldBeInSideCar(item.Key))
+                {
+                    sideCar.Set(item.Key, item.RawData, batch);
+                    continue;
+                }
+
                 Debug.Assert(item.Key.IsEmpty == false);
                 var nibble0 = item.Key.Nibble0;
 
@@ -456,7 +464,20 @@ public readonly unsafe struct BottomPage(Page page) : IPage<BottomPage>
 
         ArrayPool<byte>.Shared.Return(array);
 
-        return new DataPage(page);
+        // Move all the matching to the side-car
+        var dp = new DataPage(page);
+        var dpMap = dp.Map;
+
+        foreach (var item in dpMap.EnumerateAll())
+        {
+            if (!DataPage.ShouldBeInSideCar(item.Key))
+                continue;
+
+            sideCar.Set(item.Key, item.RawData, batch);
+            dpMap.Delete(item);
+        }
+
+        return dp;
     }
 
     public Page DeleteByPrefix(in NibblePath prefix, IBatchContext batch)
@@ -498,11 +519,7 @@ public readonly unsafe struct BottomPage(Page page) : IPage<BottomPage>
         return page;
     }
 
-    public void Clear()
-    {
-        Map.Clear();
-        Data.Buckets.Clear();
-    }
+    public void Clear() => Data.Clear();
 
     [SkipLocalsInit]
     public bool TryGet(IPageResolver batch, scoped in NibblePath key, out ReadOnlySpan<byte> result)
@@ -539,5 +556,5 @@ public readonly unsafe struct BottomPage(Page page) : IPage<BottomPage>
 
     public static PageType DefaultType => PageType.Bottom;
 
-    public bool IsClean => Map.IsEmpty && Data.Buckets.IsClean;
+    public bool IsClean => Data.IsClean;
 }

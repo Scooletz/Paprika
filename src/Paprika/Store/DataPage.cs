@@ -18,12 +18,16 @@ namespace Paprika.Store;
 [method: DebuggerStepThrough]
 public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
 {
+    /// <summary>
+    /// The maximum length of the key that will be offloaded to the sidecar.
+    /// </summary>
+    private const int MerkleSideCarMaxKeyLength = 1;
     private const int ConsumedNibbles = 1;
     private const int BucketCount = DbAddressList.Of16.Count;
 
     public static DataPage Wrap(Page page) => Unsafe.As<Page, DataPage>(ref page);
     public static PageType DefaultType => PageType.DataPage;
-    public bool IsClean => Map.IsEmpty && Data.Buckets.IsClean;
+    public bool IsClean => Data.IsClean;
 
     private ref PageHeader Header => ref page.Header;
 
@@ -39,6 +43,11 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
         }
 
         Map.DeleteByPrefix(prefix);
+
+        if (ShouldBeInSideCar(prefix) && Data.SideCar.IsNull == false)
+        {
+            new BottomPage(batch.EnsureWritableCopy(ref Data.SideCar)).DeleteByPrefix(prefix, batch);
+        }
 
         ref var buckets = ref Data.Buckets;
 
@@ -103,34 +112,36 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
 
             ref var payload = ref Unsafe.AsRef<Payload>(page.Payload);
             var map = new SlottedArray(payload.DataSpan);
-            var oddity = page.Header.Level % 2;
 
-            if (data.IsEmpty)
+            if (ShouldBeInSideCar(k))
             {
-                // Empty data means deletion.
-                // If it's a deletion and a key is empty or there's no child page, delete in page
-                if (k.Length < ConsumedNibbles || payload.Buckets[GetIndex(k)].IsNull)
+                if (data.IsEmpty && payload.SideCar.IsNull)
                 {
-                    // Empty key or a key with no children can be deleted only in-situ
-                    map.Delete(k);
+                    // No side-car, nothing to remove
                     break;
                 }
+
+                // Ensure side-car exists
+                var sideCar = payload.SideCar.IsNull
+                    ? batch.GetNewPage<BottomPage>(out payload.SideCar, page.Header.Level)
+                    : new BottomPage(batch.EnsureWritableCopy(ref payload.SideCar));
+
+                sideCar.Set(k, data, batch);
+                break;
             }
 
-            // Try to write through, if key may reside on the next level and there's a child that was written in this batch
-            DbAddress childAddr;
-            if (k.Length >= ConsumedNibbles && ShouldKeepShortKeyLocal(k) == false)
-            {
-                childAddr = payload.Buckets[GetIndex(k)];
-                if (childAddr.IsNull == false && batch.WasWritten(childAddr))
-                {
-                    // Delete the k in this page just to ensure that the write-through will write the last value.
-                    map.Delete(k);
+            Debug.Assert(ShouldBeInSideCar(k) == false);
 
-                    k = k.SliceFrom(ConsumedNibbles);
-                    current = childAddr;
-                    continue;
-                }
+            // Try to write through, if key may reside on the next level and there's a child that was written in this batch
+            var childAddr = payload.Buckets[GetIndex(k)];
+            if (childAddr.IsNull == false && batch.WasWritten(childAddr))
+            {
+                // Delete the k in this page just to ensure that the write-through will write the last value.
+                map.Delete(k);
+
+                k = k.SliceFrom(ConsumedNibbles);
+                current = childAddr;
+                continue;
             }
 
             // Try to write in the map
@@ -141,7 +152,7 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
             }
 
             // First, try to flush the existing
-            if (TryFindMostFrequentExistingNibble(oddity, map, payload.Buckets, out var nibble))
+            if (TryFindMostFrequentExistingNibble(map, payload.Buckets, out var nibble))
             {
                 childAddr = EnsureExistingChildWritable(batch, ref payload, nibble);
                 FlushDown(map, nibble, childAddr, batch);
@@ -151,7 +162,7 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
             }
 
             // None of the existing was flushable, find the most frequent one
-            nibble = FindMostFrequentNibble(oddity, map);
+            nibble = FindMostFrequentNibble(map);
 
             // Ensure that the child page exists
             childAddr = payload.Buckets[nibble];
@@ -170,39 +181,20 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
         }
     }
 
+    public static bool ShouldBeInSideCar(in NibblePath k) => k.Length <= MerkleSideCarMaxKeyLength;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static byte GetIndex(in NibblePath k) => k.Nibble0;
 
     /// <summary>
     /// A single method for stats gathering to make it simple to change the implementation.
     /// </summary>
-    private static void GatherStats(int oddity, in SlottedArray map, Span<ushort> stats)
+    private static void GatherStats(in SlottedArray map, Span<ushort> stats)
     {
         map.GatherCountStats1Nibble(stats);
-
-        // Provide a minor discount for nibbles that should be kept local
-        for (byte nibble = 0; nibble < BucketCount; nibble++)
-        {
-            ref var s = ref stats[nibble];
-
-            if (s > 0 &&
-                ShouldKeepShortKeyLocal(nibble) &&
-                map.Contains(NibblePath.Single(nibble, oddity)))
-            {
-                // The count is bigger than 0 and the nibble should be kept local so test for the key. Only then subtract.
-                s -= 1;
-            }
-        }
-
-        // other proposal to be size based, not count based
-        //map.GatherSizeStats1Nibble(stats);
     }
 
-    public void Clear()
-    {
-        Map.Clear();
-        Data.Buckets.Clear();
-    }
+    public void Clear() => Data.Clear();
 
     private static DbAddress EnsureExistingChildWritable(IBatchContext batch, ref Payload payload, byte nibble)
     {
@@ -217,13 +209,13 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
         return childAddr;
     }
 
-    private static byte FindMostFrequentNibble(int oddity, in SlottedArray map)
+    private static byte FindMostFrequentNibble(in SlottedArray map)
     {
         const int count = SlottedArray.OneNibbleStatsCount;
 
         Span<ushort> stats = stackalloc ushort[count];
 
-        GatherStats(oddity, map, stats);
+        GatherStats(map, stats);
 
         byte biggestIndex = 0;
         for (byte i = 1; i < count; i++)
@@ -237,13 +229,13 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
         return biggestIndex;
     }
 
-    private static bool TryFindMostFrequentExistingNibble(int oddity, in SlottedArray map,
+    private static bool TryFindMostFrequentExistingNibble(in SlottedArray map,
         in DbAddressList.Of16 children,
         out byte nibble)
     {
         Span<ushort> stats = stackalloc ushort[BucketCount];
 
-        GatherStats(oddity, map, stats);
+        GatherStats(map, stats);
 
         byte biggestIndex = 0;
         ushort biggestValue = 0;
@@ -271,46 +263,16 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
     {
         Debug.Assert(batch.WasWritten(child));
 
-        var keepShortKeyLocal = ShouldKeepShortKeyLocal(nibble);
-
         foreach (var item in map.EnumerateNibble(nibble))
         {
             var sliced = item.Key.SliceFrom(ConsumedNibbles);
 
-            if (keepShortKeyLocal && item.Key.Length == 1)
-            {
-                Debug.Assert(sliced.IsEmpty, "The local caching is only 1 lvl deep");
+            // Key is not kept local, propagate it down
+            Set(child, sliced, item.RawData, batch);
 
-                // The key is meant to be kept local, set a deletion underneath and leave it as is.
-                Set(child, sliced, ReadOnlySpan<byte>.Empty, batch);
-            }
-            else
-            {
-                // Key is not kept local, propagate it down
-                Set(child, sliced, item.RawData, batch);
-
-                // Use the fast delete by item.
-                map.Delete(item);
-            }
+            // Use the fast delete by item.
+            map.Delete(item);
         }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool ShouldKeepShortKeyLocal(in NibblePath path) =>
-        path.Length == 1 && ShouldKeepShortKeyLocal(path.Nibble0);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool ShouldKeepShortKeyLocal(byte nibble)
-    {
-        // The criterion whether the given nibble should be kept local or not.
-
-        // How much of the page should be occupied by branches inlined from below, in percents.
-        const int maxOccupationPercentage = 50;
-        const int fullMerkleBranchEstimation = 512;
-        const int inlinedBranchesPerPage = Page.PageSize / fullMerkleBranchEstimation * maxOccupationPercentage / 100;
-        const int saveEveryNthBranch = BucketCount / inlinedBranchesPerPage;
-
-        return nibble % saveEveryNthBranch == 0;
     }
 
     /// <summary>
@@ -327,11 +289,13 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
         /// <summary>
         /// The size of the raw byte data held in this page. Must be long aligned.
         /// </summary>
-        private const int DataSize = Size - BucketSize;
+        private const int DataSize = Size - BucketSize - DbAddress.Size;
 
         private const int DataOffset = Size - DataSize;
 
         [FieldOffset(0)] public DbAddressList.Of16 Buckets;
+
+        [FieldOffset(DbAddressList.Of16.Size)] public DbAddress SideCar;
 
         /// <summary>
         /// The first item of map of frames to allow ref to it.
@@ -342,6 +306,15 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
         /// Writable area.
         /// </summary>
         public Span<byte> DataSpan => MemoryMarshal.CreateSpan(ref DataStart, DataSize);
+
+        public bool IsClean => new SlottedArray(DataSpan).IsEmpty && Buckets.IsClean && SideCar.IsNull;
+
+        public void Clear()
+        {
+            new SlottedArray(DataSpan).Clear();
+            Buckets.Clear();
+            SideCar = default;
+        }
     }
 
     public bool TryGet(IPageResolver batch, scoped in NibblePath key, out ReadOnlySpan<byte> result)
@@ -352,6 +325,7 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
     {
         var returnValue = false;
         var sliced = key;
+        result = default;
 
         do
         {
@@ -372,15 +346,23 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
                     batch.Prefetch(bucket);
             }
 
+            if (ShouldBeInSideCar(sliced))
+            {
+                if (dataPage.Data.SideCar.IsNull)
+                    break;
+
+                var sideCar = new BottomPage(batch.GetAt(dataPage.Data.SideCar));
+                if (sideCar.TryGet(batch, sliced, out result))
+                {
+                    returnValue = true;
+                    break;
+                }
+            }
+
             // try regular map
             if (dataPage.Map.TryGet(sliced, out result))
             {
                 returnValue = true;
-                break;
-            }
-
-            if (sliced.IsEmpty) // empty keys are left in page
-            {
                 break;
             }
 
@@ -432,6 +414,11 @@ public readonly unsafe struct DataPage(Page page) : IPage<DataPage>
                     }
                 }
                 builder.Pop();
+            }
+
+            if (Data.SideCar.IsNull == false)
+            {
+                new BottomPage(resolver.GetAt(Data.SideCar)).Accept(ref builder, visitor, resolver, Data.SideCar);
             }
         }
     }

@@ -78,7 +78,7 @@ public class DbTests
             {
                 for (var account = 0; account < accountsCount; account++)
                 {
-                    batch.SetAccount(GetKey(i), GetValue(i));
+                    batch.SetAccount(GetKey(account), GetValue(account));
                 }
 
                 await batch.Commit(CommitOptions.FlushDataOnly);

@@ -230,7 +230,6 @@ public readonly unsafe struct RootPage(Page root) : IPage
         var updated = new StateRootPage(data).Set(path, rawData, batch);
         root = batch.GetAddress(updated);
     }
-
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = sizeof(byte), Size = Size)]

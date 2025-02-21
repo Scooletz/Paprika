@@ -1,9 +1,7 @@
 using System.Buffers.Binary;
-using System.Diagnostics;
 using FluentAssertions;
 using Paprika.Crypto;
 using Paprika.Data;
-using Paprika.Merkle;
 using Paprika.Store;
 
 namespace Paprika.Tests.Store;
